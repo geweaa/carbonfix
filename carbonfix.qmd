@@ -1,0 +1,307 @@
+---
+title: "Carbon fixation"
+author: "george.westmeijer@umu.se"
+date: now
+format: html
+toc: true
+number_sections: true
+theme: sandstone
+mainfont: Helvetica
+monofont: AndaleMono
+fontsize: "8"
+dpi: 300
+highlight: textmate
+df_print: paged
+code-fold: true
+code-summary: "Expand code"
+self_contained: true
+embed-resources: true
+keep_md: false
+encoding: "UTF-8"
+---
+
+```{r}
+#| label: libraries
+#| cache: false
+#| include: false
+
+library(dplyr)
+library(tidyr)
+library(tibble)
+library(forcats)
+library(ggplot2)
+library(readr)
+library(patchwork)
+library(grateful)
+library(ggtree)
+library(mclink)
+```
+
+# Read input files
+
+The file 'c-fixation-kos.gtdb-hits.tsv.gz' contains the genomes' accessions that have one or more hits of KOs part of a carbon fixation module.  
+
+```{r}
+#| label: read-kofam
+
+hits <- read_tsv('data/c-fixation-kos.gtdb-hits.tsv.gz', col_types = 'ccccdddc') %>%
+  select(-sign, -thrshld) %>%
+  #filter(evalue < 1e-6) %>% # This threshold is arbitrary for now
+  rename(accession = genome_accno)
+```
+
+
+```{r}
+#| label: read-taxonomy
+
+gtdb <- read_tsv('../gtdb/ar53_metadata_r232.tsv.gz', show_col_types = F) %>%
+  select(accession, ncbi_genbank_assembly_accession, taxonomy = gtdb_taxonomy) %>%
+  mutate(accession = gsub('^.._', '', accession)) %>%
+  mutate(taxonomy = gsub('.__', '', taxonomy))
+
+gtdb <- read_tsv('../gtdb/bac120_metadata_r232.tsv.gz', show_col_types = F) %>%
+  select(accession, ncbi_genbank_assembly_accession, taxonomy = gtdb_taxonomy) %>%
+  mutate(accession = gsub('^.._', '', accession)) %>%
+  mutate(taxonomy = gsub('.__', '', taxonomy)) %>%
+  rbind(gtdb) %>% 
+  pivot_longer(1:2, values_to = 'accession') %>% 
+  select(accession, taxonomy) %>% 
+  separate(taxonomy, into = c('domain', 'phylum', 'class', 'order', 'family', 'genus', 'species'), sep = ';') %>% 
+  distinct()
+```
+
+# KO matrix
+
+The mclink function is used to calculate the completeness of the six relevant modules (M00165, M00377, M00173, M00376, M00375, M00374). The presence of any KO for each step indicates completeness, and the completeness is a score ranging from 0 to 1. The average value of this score is the genome-specific module completeness score. For example, a score of 0.9 for a module containing 10 steps (reactions) implies 9/10 genes were present.  
+
+```{r}
+#| label: mclink
+
+kos <- hits %>% 
+  select(ko, accession) %>%
+  distinct() %>%
+  mutate(presence = 1) %>% 
+  pivot_wider(names_from = 'accession', values_from = 'presence', values_fill = 0) 
+
+# This is the actual analysis
+mcl <- mclink(data = data.frame(kos))
+
+# This extracts the data
+cov <- mcl[['coverage']] %>% 
+  as_tibble() %>% 
+  rename(module = Module_Entry, name = Module_Name) %>%
+  select(-Level_2, -Level_3, -Definition) %>% 
+  filter(module %in% c('M00165','M00377','M00173','M00376','M00375','M00374')) %>% 
+  pivot_longer(3:ncol(.), names_to = 'accession', values_to = 'score')
+```
+
+
+# Collapse archaeal phylogeny on phylum level
+
+
+```{r}
+#| label: archaeal-representatives
+
+# Read the tree (archaeal) tree and remove the 'GB' or 'RS' prefix
+tree <- ape::read.tree('../gtdb/ar53_r232.nwk')
+tree$tip.label <- gsub('^.._', '', tree$tip.label)
+
+# getMRCA() only works when two or more tips are provided. So remove clades with a single representative
+
+i <- gtdb %>%
+  filter(domain == 'Archaea') %>% 
+  select(accession, phylum) %>% 
+  # Consider only genomes represented in the tree
+  filter(accession %in% tree$tip.label) %>%
+  tibble::deframe()
+
+# Assigns the accessions of each phyla in a list
+groups <- split(names(i), i)
+
+# Compute one representative node per phylum
+phy_nodes <- sapply(groups, function(tips) {
+  if (length(tips) > 1) {
+    ape::getMRCA(tree, tips) # If the clade has more than one genome, find the MRCA
+  } else {
+    which(tree$tip.label == tips) # If only one tip, return its position in the tree
+  }
+})
+```
+
+
+
+
+```{r}
+#| label: archaeal-nodes
+
+# Ensure node indices are numeric and named by phylum (if all is well, this shouldn't change the data)
+phy_nodes <- as.numeric(phy_nodes)
+names(phy_nodes) <- names(groups)
+
+#node <- phy_nodes[[fam]]
+#tree$node.label <- rep(NA, tree$Nnode) # Remove node labels and replace with NA
+
+# Indices for tip labels
+tip_idx <- seq_along(tree$tip.label)
+
+# Assign phylum names either to tips or internal nodes
+for (p in names(phy_nodes)) {
+  node <- phy_nodes[[p]]
+  
+  if (node <= length(tree$tip.label)) {
+    # If node index corresponds to a tip - rename the tip
+    tree$tip.label[node] <- p
+  } else {
+    # Otherwise it's an internal node → assign node label
+    tree$node.label[node - length(tree$tip.label)] <- p
+  }
+}
+```
+
+
+
+
+```{r}
+#| label: collapse-archaeal-tree
+
+gt <- ggtree(tree) # This reads the original phylogeny into a ggtree object
+
+# Collapse clades (multi-tip phyla) into single branches
+for (p in names(groups)) {
+  tips <- groups[[p]]
+  
+  if (length(tips) > 1) {
+    node <- phy_nodes[p]
+    if (!is.null(node)) {
+      gt <- collapse(gt, node = node)
+    }
+  }
+}
+```
+
+
+
+
+```{r}
+#| label: highlight-archaeal-nodes
+
+for (p in names(phy_nodes)) {
+  node <- phy_nodes[p]
+  
+  if (!is.null(node)) {
+    gt <- gt + geom_hilight(node = node, alpha = 0.3)
+  }
+}
+```
+
+
+```{r}
+gt +
+  geom_tiplab(size = 2) +
+  geom_nodelab(aes(label = label), size = 2, hjust = 0)
+
+```
+
+```{r}
+ggsave(filename = 'gtdb_r232_arc_phylum.png', width = 180, height = 240, units = 'mm')
+```
+
+
+
+# Bacterial phylogeny - phylum
+
+
+```{r}
+#| label: bacterial-representatives
+
+# Read the tree (bacterial) tree and remove the 'GB' or 'RS' prefix
+tree <- ape::read.tree('../gtdb/bac120_r220.tree')
+tree$tip.label <- gsub('^.._', '', tree$tip.label)
+
+# getMRCA() only works when two or more tips are provided. So remove clades with a single representative
+
+i <- gtdb %>%
+  filter(domain == 'Bacteria') %>% 
+  select(accession, phylum) %>% 
+  # Consider only genomes represented in the tree
+  filter(accession %in% tree$tip.label) %>%
+  tibble::deframe()
+
+# Assigns the accessions of each phyla in a list
+groups <- split(names(i), i)
+
+# Compute one representative node per phylum
+phy_nodes <- sapply(groups, function(tips) {
+  if (length(tips) > 1) {
+    ape::getMRCA(tree, tips) # If the clade has more than one genome, find the MRCA
+  } else {
+    which(tree$tip.label == tips) # If only one tip, return its position in the tree
+  }
+})
+```
+
+
+
+```{r}
+#| label: bacterial-nodes
+
+# Ensure node indices are numeric and named by phylum (if all is well, this shouldn't change the data)
+phy_nodes <- as.numeric(phy_nodes)
+names(phy_nodes) <- names(groups)
+
+#node <- phy_nodes[[fam]]
+#tree$node.label <- rep(NA, tree$Nnode) # Remove node labels and replace with NA
+
+# Indices for tip labels
+tip_idx <- seq_along(tree$tip.label)
+
+# Assign phylum names either to tips or internal nodes
+for (p in names(phy_nodes)) {
+  node <- phy_nodes[[p]]
+  
+  if (node <= length(tree$tip.label)) {
+    # If node index corresponds to a tip - rename the tip
+    tree$tip.label[node] <- p
+  } else {
+    # Otherwise it's an internal node → assign node label
+    tree$node.label[node - length(tree$tip.label)] <- p
+  }
+}
+```
+
+
+```{r}
+#| label: collapse-bacterial-tree
+
+
+# Plot and collapse ('ctree' for 'collapsed tree')
+ctree <- ggtree(tree)
+
+# Collapse clades (multi-tip phyla) into single branches
+for (p in names(groups)) {
+  tips <- groups[[p]]
+  
+  if (length(tips) > 1) {
+    node <- phy_nodes[p]
+    if (!is.null(node)) {
+      ctree <- collapse(ctree, node = node)
+    }
+  }
+}
+```
+
+
+```{r}
+#| label: plot-bacterial-tree
+
+
+ctree +
+  geom_tiplab(size = 2) +
+  geom_nodelab(aes(label = label), size = 2, hjust = 0)
+
+```
+
+```{r}
+ggsave('gtdb-r232-phylum-bac.png', height = 240, width = 180, units = 'mm')
+```
+
