@@ -21,6 +21,16 @@ encoding: "UTF-8"
 ---
 
 ```{r}
+#| label: setup
+#| include: false
+#| echo: false
+
+source("../Protocols/theme.R")
+knitr::opts_chunk$set(cache = TRUE)
+```
+
+
+```{r}
 #| label: libraries
 #| cache: false
 #| include: false
@@ -69,6 +79,7 @@ gtdb <- read_tsv('../gtdb/bac120_metadata_r232.tsv.gz', show_col_types = F) %>%
   separate(taxonomy, into = c('domain', 'phylum', 'class', 'order', 'family', 'genus', 'species'), sep = ';') %>% 
   distinct()
 ```
+
 
 # KO matrix
 
@@ -164,7 +175,7 @@ for (p in names(phy_nodes)) {
 ```{r}
 #| label: collapse-archaeal-tree
 
-gt <- ggtree(tree) # This reads the original phylogeny into a ggtree object
+arctree <- ggtree(tree) # This reads the original phylogeny into a ggtree object
 
 # Collapse clades (multi-tip phyla) into single branches
 for (p in names(groups)) {
@@ -173,7 +184,7 @@ for (p in names(groups)) {
   if (length(tips) > 1) {
     node <- phy_nodes[p]
     if (!is.null(node)) {
-      gt <- collapse(gt, node = node)
+      arctree <- collapse(arctree, node = node)
     }
   }
 }
@@ -189,21 +200,25 @@ for (p in names(phy_nodes)) {
   node <- phy_nodes[p]
   
   if (!is.null(node)) {
-    gt <- gt + geom_hilight(node = node, alpha = 0.3)
+    arctree <- arctree + geom_hilight(node = node, alpha = 0.3)
   }
 }
 ```
 
 
 ```{r}
-gt +
+#| label: plot-archaea
+
+arctree +
   geom_tiplab(size = 2) +
   geom_nodelab(aes(label = label), size = 2, hjust = 0)
 
 ```
 
 ```{r}
-ggsave(filename = 'gtdb_r232_arc_phylum.png', width = 180, height = 240, units = 'mm')
+#| label: export-archaeal-phyla
+
+ggsave(filename = 'figures/gtdb_r232_arc_phylum.png', width = 180, height = 240, units = 'mm')
 ```
 
 
@@ -215,7 +230,7 @@ ggsave(filename = 'gtdb_r232_arc_phylum.png', width = 180, height = 240, units =
 #| label: bacterial-representatives
 
 # Read the tree (bacterial) tree and remove the 'GB' or 'RS' prefix
-tree <- ape::read.tree('../gtdb/bac120_r220.tree')
+tree <- ape::read.tree('../gtdb/bac120_r232.tree')
 tree$tip.label <- gsub('^.._', '', tree$tip.label)
 
 # getMRCA() only works when two or more tips are provided. So remove clades with a single representative
@@ -275,7 +290,7 @@ for (p in names(phy_nodes)) {
 
 
 # Plot and collapse ('ctree' for 'collapsed tree')
-ctree <- ggtree(tree)
+bactree <- ggtree(tree)
 
 # Collapse clades (multi-tip phyla) into single branches
 for (p in names(groups)) {
@@ -284,7 +299,7 @@ for (p in names(groups)) {
   if (length(tips) > 1) {
     node <- phy_nodes[p]
     if (!is.null(node)) {
-      ctree <- collapse(ctree, node = node)
+      bactree <- collapse(bactree, node = node)
     }
   }
 }
@@ -292,16 +307,17 @@ for (p in names(groups)) {
 
 
 ```{r}
-#| label: plot-bacterial-tree
+#| label: plot-bacteria
 
-
-ctree +
+bactree +
   geom_tiplab(size = 2) +
   geom_nodelab(aes(label = label), size = 2, hjust = 0)
 
 ```
 
 ```{r}
-ggsave('gtdb-r232-phylum-bac.png', height = 240, width = 180, units = 'mm')
+#| label: export-bacterial-phyla
+
+ggsave('figures/gtdb-r232-phylum-bac.png', height = 240, width = 180, units = 'mm')
 ```
 
