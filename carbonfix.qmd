@@ -25,7 +25,6 @@ encoding: "UTF-8"
 #| include: false
 #| echo: false
 
-source("../Protocols/theme.R")
 knitr::opts_chunk$set(cache = TRUE)
 ```
 
@@ -51,63 +50,103 @@ library(mclink)
 
 The file 'c-fixation-kos.gtdb-hits.tsv.gz' contains the genomes' accessions that have one or more hits of KOs part of a carbon fixation module.  
 
-```{r}
-#| label: read-kofam
-
-hits <- read_tsv('data/c-fixation-kos.gtdb-hits.tsv.gz', col_types = 'ccccdddc') %>%
-  select(-sign, -thrshld) %>%
-  #filter(evalue < 1e-6) %>% # This threshold is arbitrary for now
-  rename(accession = genome_accno)
-```
-
 
 ```{r}
 #| label: read-taxonomy
 
 gtdb <- read_tsv('../gtdb/ar53_metadata_r232.tsv.gz', show_col_types = F) %>%
-  select(accession, ncbi_genbank_assembly_accession, taxonomy = gtdb_taxonomy) %>%
+  select(accession, ncbi_genbank_assembly_accession, taxonomy = gtdb_taxonomy, gtdb_representative) %>%
   mutate(accession = gsub('^.._', '', accession)) %>%
   mutate(taxonomy = gsub('.__', '', taxonomy))
 
 gtdb <- read_tsv('../gtdb/bac120_metadata_r232.tsv.gz', show_col_types = F) %>%
-  select(accession, ncbi_genbank_assembly_accession, taxonomy = gtdb_taxonomy) %>%
+  select(accession, ncbi_genbank_assembly_accession, taxonomy = gtdb_taxonomy, gtdb_representative) %>%
   mutate(accession = gsub('^.._', '', accession)) %>%
   mutate(taxonomy = gsub('.__', '', taxonomy)) %>%
   rbind(gtdb) %>% 
   pivot_longer(1:2, values_to = 'accession') %>% 
-  select(accession, taxonomy) %>% 
+  select(accession, taxonomy, gtdb_representative) %>% 
   separate(taxonomy, into = c('domain', 'phylum', 'class', 'order', 'family', 'genus', 'species'), sep = ';') %>% 
-  distinct()
+  distinct() %>% 
+  # Keep only species representatives
+  filter(gtdb_representative) %>% 
+  group_by(phylum) %>% mutate(n.rep = n()) %>% ungroup() %>% 
+  select(accession, domain, phylum, n.rep) %>% distinct()
 ```
+
+
+```{r}
+#| label: read-kofam
+
+hits <- read_tsv('data/c-fixation-kos.gtdb-hits.tsv.gz', col_types = 'ccccdddc') %>%
+  select(ko, accession = genome_accno) %>%
+  distinct() %>%
+  mutate(presence = 1) %>% 
+  pivot_wider(names_from = 'accession', values_from = 'presence', values_fill = 0)
+
+markers <- read_tsv('data/ko_fixation.tsv', col_types = 'cccccclcl') %>% 
+  select(ko, module, marker) %>% 
+  filter(marker) %>% 
+  mutate(module = gsub('https://www.kegg.jp/module/', '', module)) %>% 
+  select(-marker)
+```
+
+
+```{r}
+#| label: mclink
+
+# M00165 (CBB) has 12 blocks
+# M00173 (Reverse citrate) has <nightmare>
+# M00374 (DC-HB cycle) has 21 blocks
+# M00375 (HP/HB cycle) has 17 blocks
+# M00376 (3-HP bi-cycle) has 16 blocks (15 in the case of K01847)
+# M00377 (WL pathway) has 14 blocks (13 in the case of K05299 + K15022)
+
+# This is the actual analysis
+mcl <- KO_pathway_ref %>% 
+  filter(Module_Entry %in% c('M00165','M00377','M00173','M00376','M00375','M00374')) %>% 
+  mclink(data = data.frame(hits), ref = .)
+
+# This extracts the data
+scores <- mcl[['coverage']] %>% 
+  as_tibble() %>% 
+  rename(module = Module_Entry) %>%
+  select(-Level_2, -Level_3, -Definition, -Module_Name) %>% 
+  pivot_longer(2:ncol(.), names_to = 'accession', values_to = 'score') %>% 
+  left_join(gtdb, by = 'accession') 
+```
+
+```{r}
+#| label: score-cutoff
+
+cutoff <- scores %>% 
+ # If the module score < 0.75, count it as complete
+  mutate(cutoff = if_else(score > 0.75, 1, 0)) %>% 
+  # Average the scores for each phylum/module combination
+  group_by(phylum, module) %>% 
+  # Divide the number of genes with a full module ('cutoff') by the number of genomes in that phylum ('n.rep')
+  summarise(
+    score = sum(cutoff),
+    .groups = 'drop') %>%
+  mutate(module = case_when(
+    module == 'M00165' ~ 'CBB cycle',
+    module == 'M00377' ~ 'Wood-Ljungdahl',
+    module == 'M00173' ~ 'Reverse TCA',
+    module == 'M00376' ~ '3-HP bi-cycle',
+    module == 'M00375' ~ 'HP-HB cycle',
+    module == 'M00374' ~ 'DC-HB cycle'
+  ))
+```
+
 
 
 # KO matrix
 
 The mclink function is used to calculate the completeness of the six relevant modules (M00165, M00377, M00173, M00376, M00375, M00374). The presence of any KO for each step indicates completeness, and the completeness is a score ranging from 0 to 1. The average value of this score is the genome-specific module completeness score. For example, a score of 0.9 for a module containing 10 steps (reactions) implies 9/10 genes were present.  
 
-```{r}
-#| label: mclink
 
-kos <- hits %>% 
-  select(ko, accession) %>%
-  distinct() %>%
-  mutate(presence = 1) %>% 
-  pivot_wider(names_from = 'accession', values_from = 'presence', values_fill = 0) 
-
-# This is the actual analysis
-mcl <- mclink(data = data.frame(kos))
-
-# This extracts the data
-cov <- mcl[['coverage']] %>% 
-  as_tibble() %>% 
-  rename(module = Module_Entry, name = Module_Name) %>%
-  select(-Level_2, -Level_3, -Definition) %>% 
-  filter(module %in% c('M00165','M00377','M00173','M00376','M00375','M00374')) %>% 
-  pivot_longer(3:ncol(.), names_to = 'accession', values_to = 'score')
-```
-
-
-# Collapse archaeal phylogeny on phylum level
+# Archaea
+## Collapse archaeal phylogeny on phylum level
 
 
 ```{r}
@@ -175,7 +214,7 @@ for (p in names(phy_nodes)) {
 ```{r}
 #| label: collapse-archaeal-tree
 
-arctree <- ggtree(tree) # This reads the original phylogeny into a ggtree object
+arctree <- ggtree(tree, layout = 'circular', branch.length = 'none') # This reads the original phylogeny into a ggtree object
 
 # Collapse clades (multi-tip phyla) into single branches
 for (p in names(groups)) {
@@ -206,11 +245,15 @@ for (p in names(phy_nodes)) {
 ```
 
 
+
+
+
+
 ```{r}
 #| label: plot-archaea
 
 arctree +
-  geom_tiplab(size = 2) +
+  geom_tiplab(size = 2, align = TRUE) +
   geom_nodelab(aes(label = label), size = 2, hjust = 0)
 
 ```
@@ -223,7 +266,136 @@ ggsave(filename = 'figures/gtdb_r232_arc_phylum.png', width = 180, height = 240,
 
 
 
-# Bacterial phylogeny - phylum
+## Collapse archaeal tree with single representative
+
+```{r}
+#| label: drop-nwk
+
+# There are 25 archaeal phyla in GTDB 232
+
+tree <- ape::read.tree('../gtdb/ar53_r232.nwk')
+tree$tip.label <- gsub('^.._', '', tree$tip.label) # 25 archaeal phyla in the tree
+
+# Select a single representative per phylum, 25 in total
+rep <- gtdb %>%
+  filter(domain == 'Archaea' & gtdb_representative) %>% 
+  group_by(phylum) %>%
+  slice(1) %>% pull(accession)
+
+# Drop the genomes not among the representatives
+tree <- ape::keep.tip(tree, rep)
+
+# Decorate the tip labels with phyla names
+tree$tip.label <- tree$tip.label %>% 
+  tibble() %>% 
+  rename(accession = 1) %>% 
+  left_join(gtdb, by = 'accession') %>% 
+  pull(phylum)
+
+# Export the tree
+ape::write.tree(tree, file = 'data/arc_phyla_226.nwk')
+```
+
+
+```{r}
+#| label: hits-score
+
+scores <- tree$tip.label %>% 
+  tibble() %>% select(phylum = 1) %>% 
+  left_join(cutoff, by = 'phylum', relationship = 'one-to-many') %>% 
+  replace_na(list('module' = 'CBB cycle', 'score' = 0)) %>% 
+  # Some phyla are not among the 'hits', thus have a score of 0
+  pivot_wider(names_from = 'module', values_from = 'score', values_fill = 0) %>% 
+  mutate(phylum = factor(phylum, levels = tree$tip.label)) %>% 
+  column_to_rownames('phylum')
+```
+
+
+```{r}
+#| label: complete-pathway-archaea
+
+complete <- kos %>%
+  mutate(threshold = if_else(score > 0.75, 1, 0)) %>% 
+  # Number of genomes with marker gene or complete pathway per phylum
+  group_by(phylum) %>% 
+  summarise(n = n() / 6, n_complete = sum(threshold), .groups = 'drop') %>% 
+  mutate(tip.lab = paste(phylum, ' (', n_complete, '/', n, ')', sep = ''))
+```
+
+
+```{r}
+#| label: marker-genes-archaea
+
+marker.completeness <- hits %>% 
+  pivot_longer(-1, names_to = 'accession', values_to = 'encoded') %>% 
+  filter(encoded > 0) %>% 
+  select(-encoded) %>% 
+  inner_join(markers, by = 'ko', relationship = 'many-to-many') %>% 
+  # Check if the multiple subunits of the marker gene are present
+  group_by(accession, module) %>% 
+  summarise(n = n(), .groups = 'drop') %>% 
+  mutate(complete = case_when(
+    module == 'M00165' & n == 2 ~ TRUE,
+    module == 'M00173' & n == 7 ~ TRUE,
+    module == 'M00374' & n == 1 ~ TRUE,
+    module == 'M00375' & n == 1 ~ TRUE,
+    module == 'M00376' & n == 4 ~ TRUE,
+    module == 'M00377' & n == 1 ~ TRUE,
+    .default = FALSE
+  )) %>% 
+  filter(complete) %>% 
+  left_join(gtdb, by = 'accession') %>%
+  # Summarise per phylum
+  group_by(phylum, module) %>% summarise(n.marker = n(), .groups = 'drop') %>% 
+  left_join(n.arc, by = 'phylum', relationship = 'many-to-one')
+
+i <- tree$tip.label %>% 
+  tibble() %>% select(phylum = 1) %>% 
+  left_join(marker.completeness, by = 'phylum', relationship = 'one-to-many') %>%
+  group_by(phylum, module) %>% summarise(p.marker = n.marker / n, .groups = 'drop') %>% 
+  #mutate(p.marker = n.marker / n) %>% 
+  replace_na(list('module' = 'M00165', 'p.marker' = 0)) %>% 
+  # Some phyla are not among the 'hits', thus have a score of 0
+  pivot_wider(names_from = 'module', values_from = 'p.marker', values_fill = 0) %>% 
+  mutate(phylum = factor(phylum, levels = tree$tip.label)) %>% 
+  column_to_rownames('phylum')
+```
+
+
+```{r}
+tree <- ggtree(tree, layout = 'circular', branch.length = 'none')
+
+p.tree <- tree +
+  geom_tiplab2(aes(text = label), size = 2, align = F, offset = 8)
+
+p.tree
+```
+
+
+```{r}
+gheatmap(p.tree, scores, 
+         width = 0.75,
+         colnames_angle = 285, hjust = 0, colnames_position = 'bottom', colnames_offset_y = 0.4,
+         low = '#F0F1EB', high = '#444431',
+         font.size = 6/.pt,
+         legend_title = 'Average module completeness score'
+         ) +
+  theme(
+    legend.title = element_text(size = 6),
+    legend.text = element_text(size = 6),
+    legend.position = 'bottom'
+  )
+```
+```{r}
+ggsave(filename = 'figures/heatmap.png' , width = 180, height = 180, units = 'mm')
+
+# Number of genomes after each phylum
+# Instead of average completeness score, count the number of genomes with the complete (or near-complete) module
+```
+
+
+# Bacteria
+## Bacterial phylogeny - phylum
 
 
 ```{r}
@@ -289,7 +461,7 @@ for (p in names(phy_nodes)) {
 #| label: collapse-bacterial-tree
 
 
-# Plot and collapse ('ctree' for 'collapsed tree')
+# Plot and collapse ('bactree' for 'collapsed tree')
 bactree <- ggtree(tree)
 
 # Collapse clades (multi-tip phyla) into single branches
@@ -314,6 +486,7 @@ bactree +
   geom_nodelab(aes(label = label), size = 2, hjust = 0)
 
 ```
+
 
 ```{r}
 #| label: export-bacterial-phyla
