@@ -42,6 +42,7 @@ library(ggplot2)
 library(readr)
 library(patchwork)
 library(grateful)
+library(ape)
 library(ggtree)
 library(mclink)
 ```
@@ -76,20 +77,67 @@ gtdb <- read_tsv('../gtdb/bac120_metadata_r232.tsv.gz', show_col_types = F) %>%
 
 
 ```{r}
+#| label: read-gtdb-phyla
+
+gtdb <- read_tsv('../gtdb/gtdb_phyla_r232.tsv.gz', col_types = 'ccc') %>% 
+  group_by(phylum) %>% 
+  mutate(n = n()) %>% ungroup()
+```
+
+
+```{r}
 #| label: read-kofam
 
-hits <- read_tsv('data/c-fixation-kos.gtdb-hits.tsv.gz', col_types = 'ccccdddc') %>%
-  select(ko, accession = genome_accno) %>%
-  distinct() %>%
-  mutate(presence = 1) %>% 
-  pivot_wider(names_from = 'accession', values_from = 'presence', values_fill = 0)
+hits <- read_tsv('data/kofam-besthits.tsv.gz', col_types = 'ccdd')
 
-markers <- read_tsv('data/ko_fixation.tsv', col_types = 'cccccclcl') %>% 
-  select(ko, module, marker) %>% 
-  filter(marker) %>% 
+markers <- read_tsv('data/kos_pathways.tsv', col_types = 'cccccclclcc') %>% 
+  select(ko, module, marker, accession) %>% 
+  #filter(marker) %>% 
   mutate(module = gsub('https://www.kegg.jp/module/', '', module)) %>% 
   select(-marker)
 ```
+
+
+```{r}
+kf <- list.files('data/kofam', full.names = T, pattern = '^GCA_0')
+ref <- markers$ko %>% unique()
+
+
+kofam <- tibble()
+for (file in kf) {
+  kofam <- read_tsv(file, col_types = 'cccdddc') %>% 
+    filter(ko %in% ref & !is.na(sign)) %>%
+    mutate(accession = str_sub(file, start = 12, end = 26)) %>% 
+    select(accession, ko, score, evalue) %>% 
+    rbind(kofam)
+}
+```
+
+
+```{r}
+#| label: read-representatives
+
+i <- list.files('data/c-fixation-genomes/kofam_scan', full.names = T)
+
+kofam <- tibble()
+for (file in i) {
+  kofam <- read_tsv(file, col_types = 'cccdddc') %>% 
+    mutate(accession = stringr::str_extract(file, pattern = 'GCF_000[0-9]*5.1')) %>% 
+    select(accession, orf = accno, ko, thrshld, score, evalue) %>%
+    inner_join(markers %>% select(ko, module), by = 'ko', relationship = 'many-to-many') %>% 
+    rbind(kofam)
+}
+
+
+
+# GCF_000010065.1 (S. elongatus)  M00165 Complete (2)
+# GCF_000017945.1 (I. hospitalis) M00374 Complete (1)
+# GCF_000018865.1 (C. aurantiacus) M00376 Complete (4)
+# GCF_000247605.1 (A. woodii) M00377 Complete (1)
+# GCF_000016605.1 (M. sedula) M00375 Complete (1)
+# GCF_000006985.1 (C. tepidum) M00173 Not complete (3/8)
+```
+
 
 
 ```{r}
@@ -105,7 +153,12 @@ markers <- read_tsv('data/ko_fixation.tsv', col_types = 'cccccclcl') %>%
 # This is the actual analysis
 mcl <- KO_pathway_ref %>% 
   filter(Module_Entry %in% c('M00165','M00377','M00173','M00376','M00375','M00374')) %>% 
-  mclink(data = data.frame(hits), ref = .)
+  mclink(data = data.frame(
+    hits %>%
+      select(accesion, ko) %>% 
+      mutate(presence = 1) %>% 
+      pivot_wider(names_from = 'accession', values_from = 'presence', values_fill = 0)), 
+    ref = .)
 
 # This extracts the data
 scores <- mcl[['coverage']] %>% 
@@ -115,6 +168,7 @@ scores <- mcl[['coverage']] %>%
   pivot_longer(2:ncol(.), names_to = 'accession', values_to = 'score') %>% 
   left_join(gtdb, by = 'accession') 
 ```
+
 
 ```{r}
 #| label: score-cutoff
@@ -139,6 +193,25 @@ cutoff <- scores %>%
 ```
 
 
+```{r}
+#| label: model-organisms-check
+
+# All accessions in 'hits' start with 'GCA', while all accessions in 'markers' start with 'GCF'
+# Hence, a standard join won't work
+
+markers %>% 
+  mutate(accession = gsub('GCF', 'GCA', accession)) %>% 
+  left_join(hits)
+```
+
+
+
+# Verify hits with representative species
+
+```{r}
+
+```
+
 
 # KO matrix
 
@@ -156,28 +229,31 @@ The mclink function is used to calculate the completeness of the six relevant mo
 tree <- ape::read.tree('../gtdb/ar53_r232.nwk')
 tree$tip.label <- gsub('^.._', '', tree$tip.label)
 
-# getMRCA() only works when two or more tips are provided. So remove clades with a single representative
-
 i <- gtdb %>%
   filter(domain == 'Archaea') %>% 
   select(accession, phylum) %>% 
   # Consider only genomes represented in the tree
-  filter(accession %in% tree$tip.label) %>%
-  tibble::deframe()
+  filter(accession %in% tree$tip.label & !phylum %in% c('Huberarchaeota','JACRDV01')) 
 
-# Assigns the accessions of each phyla in a list
-groups <- split(names(i), i)
-
-# Compute one representative node per phylum
-phy_nodes <- sapply(groups, function(tips) {
-  if (length(tips) > 1) {
-    ape::getMRCA(tree, tips) # If the clade has more than one genome, find the MRCA
-  } else {
-    which(tree$tip.label == tips) # If only one tip, return its position in the tree
-  }
-})
+nodes <- tibble(phylum = i$phylum %>% unique())
+for (p in nodes$phylum) {
+  tips <- i %>% filter(phylum == p) %>% pull(accession)
+  nodes[nodes$phylum == p, 'node'] <- getMRCA(tree, tips)
+}
 ```
 
+
+
+```{r}
+for (p in nodes$node) {
+  d <- phangorn::Descendants(tree, p)[[1]]
+  #clade <- ape::extract.clade(tree, p)
+  tips <- tree$tip.label[d]
+  #rep <- d[1]
+  tree <- ape::drop.tip(tree, tips[-1])
+  tree <- ape::collapse.singles(tree)
+}
+```
 
 
 
@@ -402,13 +478,13 @@ ggsave(filename = 'figures/heatmap.png' , width = 180, height = 180, units = 'mm
 #| label: bacterial-representatives
 
 # Read the tree (bacterial) tree and remove the 'GB' or 'RS' prefix
-tree <- ape::read.tree('../gtdb/bac120_r232.tree')
+tree <- ape::read.tree('../gtdb/ar53_r232.nwk')
 tree$tip.label <- gsub('^.._', '', tree$tip.label)
 
 # getMRCA() only works when two or more tips are provided. So remove clades with a single representative
 
 i <- gtdb %>%
-  filter(domain == 'Bacteria') %>% 
+  filter(domain == 'Archaea') %>% 
   select(accession, phylum) %>% 
   # Consider only genomes represented in the tree
   filter(accession %in% tree$tip.label) %>%
