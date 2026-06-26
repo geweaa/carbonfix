@@ -2,7 +2,6 @@
 .Rhistory
 figures
 data
-carbonfix_files
-carbonfix_cache
-carbonfix.RData
 .DS_Store
+kofam-besthits.tsv.gz
+mclink-scores.tsv.gz
