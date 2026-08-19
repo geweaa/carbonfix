@@ -95,7 +95,7 @@ for (file in kf) {
 ```{r}
 #| label: read-gtdb-phyla
 
-gtdb <- read_tsv('../gtdb/gtdb_phyla_r232.tsv.gz', col_types = 'ccc') %>% 
+gtdb <- read_tsv('data/gtdb-summarized.tsv.gz', col_types = 'cccc') %>% 
   group_by(phylum) %>% 
   mutate(n = n()) %>% ungroup()
 ```
@@ -110,12 +110,10 @@ hits <- read_tsv('data/kofam-besthits.tsv.gz', col_types = 'ccdcdd') %>%
   select(-score, -evalue) %>% 
   distinct()
 
-scores <- read_tsv('data/mclink-scores.tsv.gz', col_types = 'ccd') %>% 
-  left_join(gtdb, by = 'accession')
-
 markers <- read_tsv('data/kos-markers.tsv', col_types = 'cccccclclcc') %>% 
   select(ko, module, marker, accession, model_organism) %>% 
-  filter(marker) %>% 
+  filter(marker) %>%
+  filter(!module %in% c("M00620","M00579")) %>% 
   mutate(module = gsub('https://www.kegg.jp/module/', '', module))
   
 
@@ -135,26 +133,17 @@ scores <- read_tsv('data/mclink-scores.tsv.gz', col_types = 'ccd')
 
 kos <- read_tsv('data/mclink-kos.tsv.gz', col_types = 'ccc') %>% 
   filter(ko %in% markers$ko) %>% 
+  distinct() %>% 
   # M00173 had two enzymes as markers that each contain four subunits, thus eight KOs in total. 
   # To check for completeness, the subunits of each enzyme are grouped and two different subunits are required
   # These KOs are not part of any of the other modules
-  mutate(ko = case_when(
-    ko == 'K00170' ~ 'K00169',
-    ko == 'K00171' ~ 'K00169',
-    ko == 'K00172' ~ 'K00169',
-    ko == 'K00175' ~ 'K00174',
-    ko == 'K00176' ~ 'K00174',
-    ko == 'K00177' ~ 'K00174',
-    .default = ko
-  )) %>% 
-  distinct() %>% 
   # Count the number of marker genes for each module/accession id combination
-  group_by(module, accession) %>% summarise(n = n(), .groups = 'drop') %>% 
+  count(module, accession) %>% 
   mutate(complete = case_when(
-    module == 'M00165' ~ TRUE,
+    module == 'M00165' ~ n == 2,
     module == 'M00377' ~ TRUE,
-    module == 'M00173' & n == 2 ~ TRUE,
-    module == 'M00376' ~ TRUE,
+    module == 'M00173' ~ n == 8,
+    module == 'M00376' ~ n == 4,
     module == 'M00375' ~ TRUE,
     module == 'M00374' ~ TRUE,
     .default = FALSE
@@ -204,35 +193,6 @@ kos <- mcl[['detected_KOs']] %>%
   pivot_longer(2:ncol(.), names_to = 'accession', values_to = 'ko') %>% 
   # Separate the column with the KO id's
   separate_longer_delim(ko, delim = ' ') %>% 
-  # Only consider marker genes
-  filter(ko %in% markers$ko) %>% 
-  # M00173 had two enzymes as markers that each contain four subunits, thus eight KOs in total. 
-  # To check for completeness, the subunits of each enzyme are grouped and two different subunits are required
-  # These KOs are not part of any of the other modules
-  mutate(ko = case_when(
-    ko == 'K00170' ~ 'K00169',
-    ko == 'K00171' ~ 'K00169',
-    ko == 'K00172' ~ 'K00169',
-    ko == 'K00175' ~ 'K00174',
-    ko == 'K00176' ~ 'K00174',
-    ko == 'K00177' ~ 'K00174',
-    .default = ko
-  )) %>% 
-  distinct() %>% 
-  # Count the number of marker genes for each module/accession id combination
-  group_by(module, accession) %>% summarise(n = n(), .groups = 'drop') %>% 
-  mutate(complete = case_when(
-    module == 'M00165' ~ TRUE,
-    module == 'M00377' ~ TRUE,
-    module == 'M00173' & n == 2 ~ TRUE,
-    module == 'M00376' ~ TRUE,
-    module == 'M00375' ~ TRUE,
-    module == 'M00374' ~ TRUE,
-    .default = FALSE
-  )) %>% 
-  filter(complete) %>%
-  # These genomes encode for all the marker genes for the respective pathway
-  select(accession, module)
 ```
 
 
@@ -327,18 +287,16 @@ ape::write.tree(tree, file = 'data/arc_phyla_226.nwk')
 
 i <- tree$tip.label %>% 
   tibble() %>% 
-  rename(accession = 1) %>% 
+  rename(accession = 1) %>%
   left_join(gtdb, by = 'accession') %>% 
-  select(phylum) %>% 
+  select(accession, phylum) %>% 
   left_join(cutoff, by = 'phylum', relationship = 'one-to-many') %>% 
-  group_by(phylum) %>% slice_max(n.complete, n = 1) %>% ungroup() %>% 
+  group_by(phylum) %>% slice_max(n.complete, n = 1, with_ties = FALSE) %>% ungroup() %>% 
   replace_na(list('n.complete' = 0)) %>% 
-  mutate(tip.lab = if_else(
-    is.na(module), 
-    paste(phylum, ' (', n.complete, '/', n, ')', sep = ''),
-    paste(phylum, ' (', n.complete, '/', n, ', ', module, ')', sep = '')
-    )) %>% 
-  select(phylum, tip.lab)
+  mutate(tip.lab = paste(phylum, ' (', n.complete, '/', n, ')', sep = '')) %>% 
+  select(accession, phylum, tip.lab) %>% 
+  mutate(accession = factor(accession, levels = tree$tip.label)) %>% 
+  arrange(accession)
 ```
 
 
@@ -347,16 +305,26 @@ i <- tree$tip.label %>%
 ```{r}
 #| label: hits-score
 
-scores <- tree$tip.label %>% 
-  tibble() %>% select(accession = 1) %>%
-  left_join(gtdb, by = 'accession') %>% select(accession, phylum) %>% 
+d <- i %>% 
   left_join(cutoff, by = 'phylum', relationship = 'one-to-many') %>% 
-  replace_na(list('module' = 'M00165', 'n.marker' = 0)) %>% 
+  replace_na(list('module' = 'M00165', 'complete' = 0)) %>%
+  # Change module references to actual names
+  mutate(module = case_when(
+    module == 'M00165' ~ 'CBB',
+    module == 'M00173' ~ 'rTCA',
+    module == 'M00374' ~ 'DC-HB',
+    module == 'M00375' ~ 'HP-HB',
+    module == 'M00376' ~ 'HP-BC',
+    module == 'M00377' ~ 'WL'
+  )) %>%
+  mutate(module = factor(module, levels = c(
+    'CBB', 'rTCA', 'WL', 'HP-HB', 'HP-BC', 'DC-HB'
+  ))) %>%
+  arrange(module) %>% 
   # Some phyla are not among the 'hits', thus have a score of 0
-  select(-n.complete, -n) %>%
-  pivot_wider(names_from = 'module', values_from = 'complete', values_fill = 0) %>%
-  inner_join(i, by = 'phylum') %>% 
-  #mutate(phylum = factor(phylum, levels = tree$tip.label)) %>%
+  select(-n.complete, -n, -n.marker) %>%
+  pivot_wider(names_from = 'module', values_from = 'complete', values_fill = 0) %>% 
+  arrange(accession) %>% 
   column_to_rownames('tip.lab') %>% 
   select(-accession, -phylum)
 ```
@@ -375,7 +343,7 @@ tree <- ggtree(tree, layout = 'circular', branch.length = 'none')
 #| label: plot-archaeatree
 
 p.tree <- tree +
-  geom_tiplab2(aes(text = label), size = 2, align = F, offset = 5)
+  geom_tiplab2(aes(text = label), size = 2, align = F, offset = 6)
 
 p.tree
 ```
@@ -384,24 +352,26 @@ p.tree
 ```{r}
 #| label: archaeal-heatmap
 
-gheatmap(p.tree, scores, 
-         width = 0.4,
+p.arc <- gheatmap(p.tree, d, 
+         width = 0.6,
          colnames_angle = 285, hjust = 0, colnames_position = 'bottom', colnames_offset_y = 0.4,
          low = '#f0f3f3', high = '#046C9A',
-         font.size = 6/.pt,
-         legend_title = 'Genomes with complete module (%)'
+         font.size = 5/.pt,
+         legend_title = 'Genomes encoding marker genes (%)'
          ) +
   theme(
     legend.title = element_text(size = 6),
     legend.text = element_text(size = 6),
     legend.position = 'bottom',
-    legend.margin = margin(t = 1.1, 0, 0, 0, 'cm'),
+    legend.margin = margin(t = 1.7, 0, 0, 0, 'cm'),
     legend.background = element_rect(fill = 'transparent'),
-    plot.margin = margin(1.8, 1, 1, 1, 'cm')
+    plot.margin = margin(2, 1, 1, 1, 'cm')
   )
+
+p.arc
 ```
 ```{r}
-ggsave(filename = 'figures/heatmap.png' , width = 120, height = 120, units = 'mm')
+ggsave(filename = 'figures/heatmap.png' , width = 180, height = 180, units = 'mm')
 
 # Number of genomes after each phylum
 # Instead of average completeness score, count the number of genomes with the complete (or near-complete) module
@@ -420,14 +390,18 @@ ggsave(filename = 'figures/heatmap.png' , width = 120, height = 120, units = 'mm
 tree <- ape::read.tree('../gtdb/bac120_r232.tree')
 tree$tip.label <- gsub('^.._', '', tree$tip.label) # 25 archaeal phyla in the tree
 
-# Select a single representative per phylum, 25 in total
+# Select a single representative per phylum
 rep <- gtdb %>%
-  filter(domain == 'Bacteria') %>% 
+  # Filter out phyla with less than 100 representatives
+  filter(n > 99) %>% 
+  # kos contains genomes that encode marker genes, so phyla without any potential are removed
+  filter(domain == 'Bacteria' & accession %in% kos$accession) %>% 
   group_by(phylum) %>%
-  slice(1) %>% pull(accession)
+  slice(1) %>%
+  pull(accession)
 
 # Drop the genomes not among the representatives
-tree <- ape::keep.tip(tree, rep)
+tree <- ape::keep.tip(tree, rep) %>% ape::unroot()
 
 # Decorate the tip labels with phyla names
 
@@ -437,42 +411,50 @@ ape::write.tree(tree, file = 'data/bac_phyla_232.nwk')
 
 
 ```{r}
-#| label: tiplabels
+#| label: tiplabels-bacteria
 
 i <- tree$tip.label %>% 
   tibble() %>% 
-  rename(accession = 1) %>% 
+  rename(accession = 1) %>%
   left_join(gtdb, by = 'accession') %>% 
-  select(phylum) %>% 
+  select(accession, phylum) %>% 
   left_join(cutoff, by = 'phylum', relationship = 'one-to-many') %>% 
   group_by(phylum) %>% slice_max(n.complete, n = 1, with_ties = FALSE) %>% ungroup() %>% 
   replace_na(list('n.complete' = 0)) %>% 
-  mutate(tip.lab = if_else(
-    is.na(module), 
-    paste(phylum, ' (', n.complete, '/', n, ')', sep = ''),
-    paste(phylum, ' (', n.complete, '/', n, ', ', module, ')', sep = '')
-    )) %>% 
-  select(phylum, tip.lab)
+  mutate(tip.lab = paste(phylum, ' (', n.complete, '/', n, ')', sep = '')) %>% 
+  select(accession, phylum, tip.lab) %>% 
+  mutate(accession = factor(accession, levels = tree$tip.label)) %>% 
+  arrange(accession)
 ```
+
+
 
 
 ```{r}
 #| label: bacteria-score
 
-scores <- tree$tip.label %>% 
-  tibble() %>% select(accession = 1) %>%
-  left_join(gtdb, by = 'accession') %>% select(accession, phylum) %>% 
+d <- i %>% 
   left_join(cutoff, by = 'phylum', relationship = 'one-to-many') %>% 
   replace_na(list('module' = 'M00165', 'complete' = 0)) %>% 
+  mutate(module = case_when(
+    module == 'M00165' ~ 'CBB',
+    module == 'M00173' ~ 'rTCA',
+    module == 'M00374' ~ 'DC-HB',
+    module == 'M00375' ~ 'HP-HB',
+    module == 'M00376' ~ 'HP-BC',
+    module == 'M00377' ~ 'WL'
+  )) %>% 
+  mutate(module = factor(module, levels = c(
+    'CBB', 'rTCA', 'WL', 'HP-HB', 'HP-BC', 'DC-HB'
+  ))) %>%
+  arrange(module) %>% 
   # Some phyla are not among the 'hits', thus have a score of 0
-  select(-n.complete, -n) %>%
-  pivot_wider(names_from = 'module', values_from = 'complete', values_fill = 0) %>%
-  inner_join(i, by = 'phylum') %>% 
-  #mutate(phylum = factor(phylum, levels = tree$tip.label)) %>%
+  select(-n.complete, -n, -n.marker) %>%
+  pivot_wider(names_from = 'module', values_from = 'complete', values_fill = 0) %>% 
+  arrange(accession) %>% 
   column_to_rownames('tip.lab') %>% 
   select(-accession, -phylum)
 ```
-
 
 
 ```{r}
@@ -488,7 +470,7 @@ tree <- ggtree(tree, layout = 'circular', branch.length = 'none')
 #| label: plot-archaeatree
 
 p.tree <- tree +
-  geom_tiplab2(aes(text = label), size = 2, align = F, offset = 10)
+  geom_tiplab2(aes(text = label), size = 2, align = F, offset = 8)
 
 p.tree
 ```
@@ -497,26 +479,276 @@ p.tree
 ```{r}
 #| label: archaeal-heatmap
 
-gheatmap(p.tree, scores, 
-         width = 0.4,
-         colnames_angle = 285, hjust = 0, colnames_position = 'bottom', colnames_offset_y = 0.4,
+p.bac <- gheatmap(p.tree, d, 
+         width = 0.6,
+         colnames_angle = 275, hjust = 0, colnames_position = 'bottom', colnames_offset_y = 0.4,
          low = '#f0f3f3', high = '#046C9A',
          font.size = 6/.pt,
-         legend_title = 'Genomes with complete module (%)'
+         legend_title = 'Genomes with marker genes (%)'
          ) +
   theme(
-    legend.title = element_text(size = 6),
-    legend.text = element_text(size = 6),
-    legend.position = 'bottom',
+    legend.title = element_text(size = 5),
+    legend.text = element_text(size = 5),
+    legend.position = 'none',
     legend.margin = margin(t = 1.1, 0, 0, 0, 'cm'),
     legend.background = element_rect(fill = 'transparent'),
     plot.margin = margin(1.8, 1, 1, 1, 'cm')
   )
+
+p.bac
 ```
+
 ```{r}
-ggsave(filename = 'figures/heatmap_bacteria.pdf' , width = 240, height = 240, units = 'mm')
+p.arc + plot_spacer() + p.bac + plot_annotation(tag_levels = 'a') + plot_layout(widths = c(0.7, -0.04, 1)) &
+  theme(
+    #legend.position = 'bottom',
+    plot.tag = element_text(size = 8, face = 'bold'),
+    plot.margin = margin(l = 10, t = 8, r = 9, unit = 'mm')
+  )
+```
+
+
+
+
+
+```{r}
+ggsave(filename = 'figures/heatmap_bacteria.pdf', width = 200, height = 120, units = 'mm')
+ggsave(filename = 'figures/heatmap_bacteria.png', width = 200, height = 120, units = 'mm')
+
 
 # Number of genomes after each phylum
 # Instead of average completeness score, count the number of genomes with the complete (or near-complete) module
+```
+
+
+## Bacterial phylogeny - family
+
+
+```{r}
+#| label: drop-nwk-bacteria
+
+# There are 25 archaeal phyla in GTDB 232
+
+tree <- ape::read.tree('../gtdb/bac120_r232.tree')
+tree$tip.label <- gsub('^.._', '', tree$tip.label) # 25 archaeal phyla in the tree
+
+# Select a single representative per phylum
+rep <- gtdb %>%
+  select(-n) %>% add_count(family) %>% 
+  #filter(phylum %in% c('Pseudomonadota', 'Campylobacterota')) %>% 
+  filter(phylum == 'Campylobacterota' & n > 19 | phylum == 'Pseudomonadota' & n > 199) %>% 
+  # kos contains genomes that encode marker genes, so phyla without any potential are removed
+  filter(accession %in% kos$accession) %>% 
+  group_by(family) %>%
+  slice(1) %>%
+  pull(accession)
+
+# Drop the genomes not among the representatives
+tree <- ape::keep.tip(tree, rep) %>% ape::unroot()
+```
+
+
+```{r}
+#| label: tiplabels-bacteria-family
+
+cutoff <- scores %>% 
+  # inner_join() implies that only select genomes that encode for the marker genes
+  inner_join(kos, by = c('accession', 'module')) %>% 
+  # If the module score < 0.75, count it as complete
+  mutate(score = if_else(score > 0.75, 1, 0)) %>% 
+  inner_join(gtdb, by = 'accession') %>% 
+  # Summarize the scores for each phylum/module combination
+  group_by(family, module) %>% 
+  summarise(n.marker = n(), n.complete = sum(score), .groups = 'drop') %>%
+  # Some phyla are not represented but should get a value
+  right_join(
+    gtdb %>% count(family) %>% distinct(), by = 'family', relationship = 'many-to-one') %>% 
+  mutate(complete = round(n.marker / n * 100, digits = 1))
+
+i <- tree$tip.label %>% 
+  tibble() %>% 
+  rename(accession = 1) %>%
+  left_join(gtdb, by = 'accession') %>% 
+  select(accession, family) %>% 
+  left_join(cutoff, by = 'family', relationship = 'one-to-many') %>% 
+  group_by(family) %>% slice_max(n.complete, n = 1, with_ties = FALSE) %>% ungroup() %>% 
+  replace_na(list('n.complete' = 0)) %>% 
+  mutate(tip.lab = paste(family, ' (', n.complete, '/', n, ')', sep = '')) %>% 
+  select(accession, family, tip.lab) %>% 
+  mutate(accession = factor(accession, levels = tree$tip.label)) %>% 
+  arrange(accession)
+```
+
+
+
+
+```{r}
+#| label: bacteria-score
+
+d <- i %>% 
+  left_join(cutoff, by = 'family', relationship = 'one-to-many') %>% 
+  replace_na(list('module' = 'M00165', 'complete' = 0)) %>% 
+  mutate(module = case_when(
+    module == 'M00165' ~ 'CBB',
+    module == 'M00173' ~ 'rTCA',
+    module == 'M00374' ~ 'DC-HB',
+    module == 'M00375' ~ 'HP-HB',
+    module == 'M00376' ~ 'HP-BC',
+    module == 'M00377' ~ 'WL'
+  )) %>% 
+  mutate(module = factor(module, levels = c(
+    'CBB', 'rTCA', 'WL', 'HP-HB', 'HP-BC', 'DC-HB'
+  ))) %>%
+  arrange(module) %>% 
+  # Some phyla are not among the 'hits', thus have a score of 0
+  select(-n.complete, -n, -n.marker) %>%
+  pivot_wider(names_from = 'module', values_from = 'complete', values_fill = 0) %>% 
+  arrange(accession) %>% 
+  column_to_rownames('tip.lab') %>% 
+  select(-accession, -family)
+```
+
+
+```{r}
+#| label: bacteria-ggtree
+
+tree$tip.label <- i$tip.lab
+
+tree <- ggtree(tree, layout = 'circular', branch.length = 'none')
+
+
+```
+
+
+```{r}
+#| label: plot-archaeatree
+
+p.tree <- tree +
+  geom_tiplab2(aes(text = label), size = 2, align = F, offset = 10) +
+  #geom_nodelab(aes(label = node), fontsize = 1.2) +
+  geom_hilight(node = 118, fill = 'darkgreen', alpha = 0.2) +
+  geom_hilight(node = 100, fill = 'red', alpha = 0.2) +
+  geom_hilight(node = 88, fill = 'red', alpha = 0.2) +
+  geom_hilight(node = 67, fill = 'red', alpha = 0.2)
+
+p.tree + theme(
+  plot.margin = margin(20, 20, 20, 20, unit = 'mm')
+)
+```
+
+
+```{r}
+#| label: archaeal-heatmap
+
+p.bac <- gheatmap(p.tree, d, 
+         width = 0.6,
+         colnames_angle = 275, hjust = 0, colnames_position = 'bottom', colnames_offset_y = 0.4,
+         low = '#f0f3f3', high = '#046C9A',
+         font.size = 6/.pt,
+         legend_title = 'Genomes with marker genes (%)'
+         ) +
+  theme(
+    legend.title = element_text(size = 5),
+    legend.text = element_text(size = 5),
+    legend.position = 'none',
+    legend.margin = margin(t = 1.1, 0, 0, 0, 'cm'),
+    legend.background = element_rect(fill = 'transparent'),
+    plot.margin = margin(1.8, 1, 1, 1, 'cm')
+  )
+
+p.bac
+```
+
+```{r}
+p.arc + plot_spacer() + p.bac + plot_annotation(tag_levels = 'a') + plot_layout(widths = c(0.7, -0.04, 1)) &
+  theme(
+    #legend.position = 'bottom',
+    plot.tag = element_text(size = 8, face = 'bold'),
+    plot.margin = margin(l = 10, t = 8, r = 9, unit = 'mm')
+  )
+```
+
+
+
+
+
+```{r}
+ggsave(filename = 'figures/heatmap_family.pdf', width = 200, height = 120, units = 'mm')
+
+
+# Number of genomes after each phylum
+# Instead of average completeness score, count the number of genomes with the complete (or near-complete) module
+```
+
+
+
+# Ribonucleotide reductase
+
+NrdA/E (α, catalytic subunit) + NrdB/F (β, radical-generating subunit)
+
+KEGG has:
+
+    K00525 — nrdA, nrdE; ribonucleoside-diphosphate reductase alpha chain
+    K00526 — nrdB, nrdF; ribonucleoside-diphosphate reductase beta chain
+
+2. Class II — K00524
+
+Class II is much simpler.
+
+It is essentially a single multifunctional protein, NrdJ, rather than the α/β architecture of class I.
+
+KEGG:
+
+K00524 — nrdJ; ribonucleotide reductase, class II
+
+The enzyme uses adenosylcobalamin (AdoCbl/B₁₂) to generate the radical. Importantly, this makes it oxygen-independent, not anaerobic. A class-II RNR can therefore be used by an organism living in oxygenated conditions.
+
+This distinction is biologically important because some bacteria carry both:
+
+Class I   → K00525 + K00526
+Class II  → K00524
+
+and can switch their RNR system according to environmental conditions/cofactor availability.
+
+There is also a KEGG wrinkle here: you will sometimes encounter K00527 (rtpR), which is another oxygen-independent NTP-reducing RNR. KEGG currently separates it from canonical NrdJ:
+
+    K00524 = NrdJ, class II RNR
+    K00527 = RtpR, ribonucleoside-triphosphate reductase
+
+So if your goal is to identify all oxygen-independent RNRs, don't necessarily restrict yourself to K00524.
+
+3. Class III — K21636 + K04068
+
+This is the anaerobic system.
+
+The enzyme itself is:
+
+NrdD
+
+and it requires the radical-SAM activating protein:
+
+NrdG
+
+KEGG currently gives:
+
+    K21636 — nrdD; ribonucleoside-triphosphate reductase (formate)
+    K04068 — nrdG; anaerobic ribonucleoside-triphosphate reductase activating protein
+
+
+```{r}
+nrd <- read_tsv('data/nrd-hits.tsv.gz', col_types = 'ccdd') %>% 
+  group_by(accession, ko) %>% 
+  slice_max(score, n = 1, with_ties = FALSE) %>% 
+  ungroup()
+
+class <- nrd %>%
+  group_by(accession) %>% 
+  mutate(class = case_when(
+    all(c('K00525', 'K00526') %in% ko) ~ 'I',
+    ko %in% c('K00524', 'K00527')  ~ 'II',
+    all(c('K21636', 'K04068') %in% ko) ~ 'III',
+    .default = 'unknown'
+  )) %>% ungroup() %>% 
+  select(accession, class) %>% distinct()
 ```
 
