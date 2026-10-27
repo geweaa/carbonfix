@@ -34,7 +34,7 @@ knitr::opts_chunk$set(cache = TRUE)
 #| cache: false
 #| include: false
 
-library(dplyr)
+library(duckplyr)
 library(tidyr)
 library(tibble)
 library(forcats)
@@ -76,18 +76,41 @@ gtdb <- read_tsv('../gtdb/bac120_metadata_r232.tsv.gz', show_col_types = F) %>%
 
 
 ```{r}
-kf <- list.files('data/kofam', full.names = T, pattern = '^GCA')
+#| label: read-kofam
+
+i <- list.files('data/kofam', full.names = T, pattern = '^GCA')
 ref <- markers$ko %>% unique()
 
 
 kofam <- tibble()
-for (file in kf) {
+for (file in i) {
   kofam <- read_tsv(file, col_types = 'cccdddc') %>% 
     filter(ko %in% ref & !is.na(sign)) %>%
     mutate(accession = stringr::str_sub(file, start = 12, end = 26)) %>% 
     select(accession, ko, score, evalue) %>% 
     rbind(kofam)
 }
+
+kofam |> write_tsv('data/kofam-besthits.tsv.gz')
+```
+
+
+```{r}
+#| label: read-nrc
+
+i <- list.files('data/kofam', full.names = T, pattern = '^GCA')
+ref <- c('K00524', 'K00525', 'K00526', 'K00527', 'K21636', 'K04068')
+
+nrd <- tibble()
+for (file in i) {
+  kofam <- read_tsv(file, col_types = 'cccdddc') %>% 
+    filter(ko %in% ref & !is.na(sign)) %>%
+    mutate(accession = stringr::str_sub(file, start = 12, end = 26)) %>% 
+    select(accession, ko, score, evalue) %>% 
+    rbind(nrc)
+}
+
+nrd |> write_tsv('data/nrd-hits.tsv.gz')
 ```
 
 
@@ -104,7 +127,7 @@ The KOfam output has been filtered by threshold (*), thereby only retaining KOs 
 
 
 ```{r}
-#| label: read-kofam
+#| label: read-kofam-hits
 
 hits <- read_tsv('data/kofam-besthits.tsv.gz', col_types = 'ccdcdd') %>% 
   select(-score, -evalue) %>% 
@@ -186,13 +209,17 @@ scores <- mcl[['coverage']] %>%
   select(-Level_2, -Level_3, -Definition, -Module_Name) %>% 
   pivot_longer(2:ncol(.), names_to = 'accession', values_to = 'score')
 
+scores |> write_tsv('data/mclink-scores.tsv.gz')
+
 kos <- mcl[['detected_KOs']] %>% 
   as_tibble() %>% 
   rename(module = Module_Entry) %>%
   select(-Level_2, -Level_3, -Definition, -Module_Name) %>% 
   pivot_longer(2:ncol(.), names_to = 'accession', values_to = 'ko') %>% 
   # Separate the column with the KO id's
-  separate_longer_delim(ko, delim = ' ') %>% 
+  separate_longer_delim(ko, delim = ' ')
+
+scores |> write_tsv('data/mclink-kos.tsv.gz')
 ```
 
 
